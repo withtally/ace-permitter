@@ -88,16 +88,21 @@ contract PermitterV2FuzzTest is Test {
 
   /// @notice Fuzz test: Valid signatures from trusted signer should pass
   function testFuzz_signatureVerification_trustedSignerPasses(
-    address randomBidder,
+    uint256 bidderSeed,
     uint128 randomAmount,
-    uint256 randomMaxBid,
     uint256 randomExpiry
   ) public {
-    // Bound inputs
-    vm.assume(randomBidder != address(0));
-    vm.assume(randomAmount > 0 && randomAmount <= 100 ether);
-    vm.assume(randomMaxBid >= randomAmount && randomMaxBid <= 100 ether);
-    vm.assume(randomExpiry > block.timestamp && randomExpiry < block.timestamp + 365 days);
+    // Create a valid bidder address from seed (never zero)
+    address randomBidder = address(uint160(bound(bidderSeed, 1, type(uint160).max)));
+
+    // Bound amount to valid range
+    randomAmount = uint128(bound(randomAmount, 1, 100 ether));
+
+    // Bound expiry to future (at least current timestamp)
+    randomExpiry = bound(randomExpiry, block.timestamp, block.timestamp + 365 days);
+
+    // maxBid must be >= amount
+    uint256 randomMaxBid = bound(randomAmount, randomAmount, 100 ether);
 
     IPermitter.Permit memory permit =
       IPermitter.Permit({bidder: randomBidder, maxBidAmount: randomMaxBid, expiry: randomExpiry});
@@ -115,8 +120,9 @@ contract PermitterV2FuzzTest is Test {
   // ========== CAP INVARIANT FUZZ TESTS ==========
 
   /// @notice Fuzz test: Cumulative bids never exceed personal cap
-  function testFuzz_capInvariant_cumulativeNeverExceedsCap(uint128[] memory bidAmounts) public {
-    vm.assume(bidAmounts.length > 0 && bidAmounts.length <= 10);
+  function testFuzz_capInvariant_cumulativeNeverExceedsCap(uint256 seed, uint8 numBids) public {
+    // Bound number of bids to 1-10
+    numBids = uint8(bound(numBids, 1, 10));
 
     address bidder = makeAddr("testBidder");
     uint256 personalCap = 50 ether;
@@ -129,12 +135,9 @@ contract PermitterV2FuzzTest is Test {
 
     uint256 totalBid = 0;
 
-    for (uint256 i = 0; i < bidAmounts.length; i++) {
-      uint128 amount = bidAmounts[i];
-      if (amount == 0) continue;
-
-      // Bound amount to reasonable range
-      if (amount > 10 ether) amount = 10 ether;
+    for (uint256 i = 0; i < numBids; i++) {
+      // Generate deterministic amount from seed
+      uint128 amount = uint128(bound(uint256(keccak256(abi.encode(seed, i))), 1, 10 ether));
 
       if (totalBid + amount <= personalCap) {
         vm.prank(auction);
@@ -198,13 +201,20 @@ contract PermitterV2FuzzTest is Test {
 
   /// @notice Fuzz test: Expired permits always fail
   function testFuzz_expiredPermits_alwaysFail(
-    address randomBidder,
+    uint256 bidderSeed,
     uint128 randomAmount,
     uint256 pastExpiry
   ) public {
-    vm.assume(randomBidder != address(0));
-    vm.assume(randomAmount > 0 && randomAmount <= 10 ether);
-    vm.assume(pastExpiry < block.timestamp);
+    // Create valid bidder from seed
+    address randomBidder = address(uint160(bound(bidderSeed, 1, type(uint160).max)));
+
+    // Bound amount to valid range
+    randomAmount = uint128(bound(randomAmount, 1, 10 ether));
+
+    // Bound pastExpiry to be in the past (0 to block.timestamp - 1)
+    // If block.timestamp is 0, skip (shouldn't happen in practice)
+    if (block.timestamp == 0) return;
+    pastExpiry = bound(pastExpiry, 0, block.timestamp - 1);
 
     IPermitter.Permit memory permit =
       IPermitter.Permit({bidder: randomBidder, maxBidAmount: randomAmount * 2, expiry: pastExpiry});
