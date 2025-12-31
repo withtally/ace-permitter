@@ -423,7 +423,9 @@ contract GlobalCap is PermitterTest {
     cca.submitBid(1e18, 15_000e18, bidder1, "");
 
     vm.prank(bidder2);
-    vm.expectRevert(abi.encodeWithSelector(Permitter.GlobalCapExceeded.selector, 10_000e18, 5000e18));
+    vm.expectRevert(
+      abi.encodeWithSelector(Permitter.GlobalCapExceeded.selector, 10_000e18, 5000e18)
+    );
     cca.submitBid(1e18, 10_000e18, bidder2, "");
   }
 

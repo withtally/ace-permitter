@@ -248,10 +248,7 @@ contract Permitter is IValidationHook, Initializable {
 
     // Build payload for policy engine
     IPolicyEngine.Payload memory payload = IPolicyEngine.Payload({
-      selector: this.validate.selector,
-      sender: user,
-      calldata_: abi.encode(ccid),
-      context: ""
+      selector: this.validate.selector, sender: user, calldata_: abi.encode(ccid), context: ""
     });
 
     // Check policy - this will revert if policy rejects
@@ -283,18 +280,13 @@ contract Permitter is IValidationHook, Initializable {
 
     uint256 remaining = globalCap > totalCommitted ? globalCap - totalCommitted : 0;
 
-    if (totalCommitted + amount > globalCap) {
-      revert GlobalCapExceeded(amount, remaining);
-    }
+    if (totalCommitted + amount > globalCap) revert GlobalCapExceeded(amount, remaining);
   }
 
   /// @notice Records a commitment
   function _recordCommitment(address user, bytes32 ccid, uint256 amount) internal {
-    if (ccid != bytes32(0)) {
-      committedByCCID[ccid] += amount;
-    } else {
-      committedByAddress[user] += amount;
-    }
+    if (ccid != bytes32(0)) committedByCCID[ccid] += amount;
+    else committedByAddress[user] += amount;
     totalCommitted += amount;
   }
 
