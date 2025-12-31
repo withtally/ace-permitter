@@ -26,15 +26,7 @@ contract PermitterFactory {
   /// @notice Emitted when a new Permitter is created
   /// @param permitter The address of the new permitter
   /// @param creator The address that created the permitter
-  /// @param auction The CCA auction this permitter validates
-  event PermitterCreated(
-    address indexed permitter, address indexed creator, address indexed auction
-  );
-
-  // ========== ERRORS ==========
-
-  /// @notice Thrown when a zero address is provided where not allowed
-  error ZeroAddress();
+  event PermitterCreated(address indexed permitter, address indexed creator);
 
   // ========== CONSTRUCTOR ==========
 
@@ -45,27 +37,29 @@ contract PermitterFactory {
 
   // ========== EXTERNAL FUNCTIONS ==========
 
-  /// @notice Creates a new Permitter for an auction
+  /// @notice Creates a new Permitter
+  /// @dev The permitter is created without an authorized CCA. Call authorizeCCA on the
+  ///      permitter after creation to set the auction contract.
   /// @param config The configuration for the permitter
   /// @return permitter The address of the new permitter
   // slither-disable-next-line reentrancy-benign,reentrancy-events
   function createPermitter(Permitter.Config calldata config) external returns (address permitter) {
-    if (config.auction == address(0)) revert ZeroAddress();
-
     // Clone the implementation
     permitter = IMPLEMENTATION.clone();
 
-    // Initialize the clone
+    // Initialize the clone (msg.sender becomes owner)
     Permitter(permitter).initialize(msg.sender, config);
 
     // Register the permitter
     isPermitter[permitter] = true;
     _permittersByCreator[msg.sender].push(permitter);
 
-    emit PermitterCreated(permitter, msg.sender, config.auction);
+    emit PermitterCreated(permitter, msg.sender);
   }
 
   /// @notice Creates a permitter with deterministic address
+  /// @dev The permitter is created without an authorized CCA. Call authorizeCCA on the
+  ///      permitter after creation to set the auction contract.
   /// @param config The configuration for the permitter
   /// @param salt The salt for deterministic deployment
   /// @return permitter The address of the new permitter
@@ -74,14 +68,12 @@ contract PermitterFactory {
     external
     returns (address permitter)
   {
-    if (config.auction == address(0)) revert ZeroAddress();
-
     permitter = IMPLEMENTATION.cloneDeterministic(salt);
     Permitter(permitter).initialize(msg.sender, config);
     isPermitter[permitter] = true;
     _permittersByCreator[msg.sender].push(permitter);
 
-    emit PermitterCreated(permitter, msg.sender, config.auction);
+    emit PermitterCreated(permitter, msg.sender);
   }
 
   /// @notice Predicts the address of a deterministic permitter
