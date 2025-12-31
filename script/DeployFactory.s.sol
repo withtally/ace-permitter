@@ -6,9 +6,9 @@ pragma solidity 0.8.30;
 import {Script, console2} from "forge-std/Script.sol";
 import {PermitterFactory} from "src/PermitterFactory.sol";
 
-/// @title Deploy
+/// @title DeployFactory
 /// @notice Deployment script for PermitterFactory
-contract Deploy is Script {
+contract DeployFactory is Script {
   function run() public returns (PermitterFactory factory) {
     vm.broadcast();
     factory = new PermitterFactory();
