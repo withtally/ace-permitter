@@ -7,7 +7,6 @@ import {PermitterFactory} from "../src/PermitterFactory.sol";
 import {MockCCA} from "./mocks/MockCCA.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockPolicyEngine} from "./mocks/MockPolicyEngine.sol";
-import {MockPriceOracle} from "./mocks/MockPriceOracle.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 contract PermitterTest is Test {
@@ -16,7 +15,6 @@ contract PermitterTest is Test {
   MockCCA cca;
   MockIdentityRegistry identityRegistry;
   MockPolicyEngine policyEngine;
-  MockPriceOracle priceOracle;
 
   address owner = makeAddr("owner");
   address bidder1 = makeAddr("bidder1");
@@ -24,35 +22,26 @@ contract PermitterTest is Test {
   bytes32 ccid1 = keccak256("ccid1");
   bytes32 ccid2 = keccak256("ccid2");
 
-  // Default test values
-  uint256 constant PER_USER_LIMIT = 10_000e18; // $10,000
-  uint256 constant GLOBAL_CAP = 50_000_000e18; // $50M
-  int256 constant PRICE = 1e8; // $1 with 8 decimals
-  uint8 constant ORACLE_DECIMALS = 8;
-  uint8 constant BID_TOKEN_DECIMALS = 18;
+  // Default test values (token-denominated)
+  uint256 constant PER_USER_LIMIT = 10_000e18; // 10,000 tokens
+  uint256 constant GLOBAL_CAP = 50_000_000e18; // 50M tokens
 
   function setUp() public virtual {
     factory = new PermitterFactory();
     identityRegistry = new MockIdentityRegistry();
     policyEngine = new MockPolicyEngine();
-    priceOracle = new MockPriceOracle(PRICE, ORACLE_DECIMALS);
 
     // Create a permitter through the factory
     Permitter.Config memory config = Permitter.Config({
-      auction: address(0), // Will be set to CCA after CCA is created
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: true,
       requireAllowlist: false
     });
 
-    // Create permitter first with a placeholder auction
-    config.auction = makeAddr("placeholder");
     vm.prank(owner);
     address permitterAddr = factory.createPermitter(config);
     permitter = Permitter(permitterAddr);
@@ -65,22 +54,25 @@ contract PermitterTest is Test {
     identityRegistry.registerIdentity(bidder2, ccid2);
   }
 
-  function _createPermitterWithAuction(address auction) internal returns (Permitter) {
+  function _createPermitterAndAuthorizeCCA() internal returns (Permitter) {
     Permitter.Config memory config = Permitter.Config({
-      auction: auction,
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: true,
       requireAllowlist: false
     });
 
     vm.prank(owner);
-    return Permitter(factory.createPermitter(config));
+    Permitter p = Permitter(factory.createPermitter(config));
+
+    // Authorize the CCA
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
+
+    return p;
   }
 }
 
@@ -89,43 +81,21 @@ contract PermitterTest is Test {
 contract Initialize is PermitterTest {
   function test_InitializesCorrectly() public view {
     assertEq(permitter.owner(), owner);
-    assertEq(permitter.perUserLimitUsd(), PER_USER_LIMIT);
-    assertEq(permitter.globalCapUsd(), GLOBAL_CAP);
-    assertEq(permitter.bidTokenDecimals(), BID_TOKEN_DECIMALS);
+    assertEq(permitter.perUserLimit(), PER_USER_LIMIT);
+    assertEq(permitter.globalCap(), GLOBAL_CAP);
     assertTrue(permitter.requireSanctionsCheck());
     assertFalse(permitter.requireAllowlist());
     assertFalse(permitter.paused());
-  }
-
-  function test_SetsDefaultGlobalCap() public {
-    Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
-      identityRegistry: address(identityRegistry),
-      policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
-      merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: 0, // Should default to 50M
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
-      requireSanctionsCheck: false,
-      requireAllowlist: false
-    });
-
-    vm.prank(owner);
-    Permitter p = Permitter(factory.createPermitter(config));
-    assertEq(p.globalCapUsd(), 50_000_000e18);
+    assertEq(permitter.auction(), address(0)); // Not authorized yet
   }
 
   function test_RevertIf_ReinitializeAttempted() public {
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(0),
       policyEngine: address(0),
-      priceOracle: address(0),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: 0,
-      globalCapUsd: 0,
-      bidTokenDecimals: 18,
+      perUserLimit: 0,
+      globalCap: 0,
       requireSanctionsCheck: false,
       requireAllowlist: false
     });
@@ -139,14 +109,11 @@ contract Initialize is PermitterTest {
     Permitter freshPermitter = new Permitter();
 
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(0),
       policyEngine: address(0),
-      priceOracle: address(0),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: 0,
-      globalCapUsd: 0,
-      bidTokenDecimals: 18,
+      perUserLimit: 0,
+      globalCap: 0,
       requireSanctionsCheck: false,
       requireAllowlist: false
     });
@@ -154,26 +121,44 @@ contract Initialize is PermitterTest {
     vm.expectRevert(Permitter.ZeroAddress.selector);
     freshPermitter.initialize(address(0), config);
   }
+}
 
-  function test_RevertIf_ZeroAuction() public {
-    // Deploy a fresh Permitter (not through factory)
-    Permitter freshPermitter = new Permitter();
+// ========== CCA AUTHORIZATION TESTS ==========
 
-    Permitter.Config memory config = Permitter.Config({
-      auction: address(0), // Zero auction
-      identityRegistry: address(0),
-      policyEngine: address(0),
-      priceOracle: address(0),
-      merkleRoot: bytes32(0),
-      perUserLimitUsd: 0,
-      globalCapUsd: 0,
-      bidTokenDecimals: 18,
-      requireSanctionsCheck: false,
-      requireAllowlist: false
-    });
+contract AuthorizeCCA is PermitterTest {
+  function test_AuthorizesCCA() public {
+    vm.prank(owner);
+    permitter.authorizeCCA(address(cca));
 
+    assertEq(permitter.auction(), address(cca));
+  }
+
+  function test_EmitsCCAAuthorizedEvent() public {
+    vm.prank(owner);
+    vm.expectEmit(true, true, true, true);
+    emit Permitter.CCAAuthorized(address(cca));
+    permitter.authorizeCCA(address(cca));
+  }
+
+  function test_RevertIf_NotOwner() public {
+    vm.prank(bidder1);
+    vm.expectRevert(Permitter.Unauthorized.selector);
+    permitter.authorizeCCA(address(cca));
+  }
+
+  function test_RevertIf_ZeroAddress() public {
+    vm.prank(owner);
     vm.expectRevert(Permitter.ZeroAddress.selector);
-    freshPermitter.initialize(owner, config);
+    permitter.authorizeCCA(address(0));
+  }
+
+  function test_RevertIf_AlreadyAuthorized() public {
+    vm.prank(owner);
+    permitter.authorizeCCA(address(cca));
+
+    vm.prank(owner);
+    vm.expectRevert(Permitter.CCAAlreadyAuthorized.selector);
+    permitter.authorizeCCA(makeAddr("anotherCCA"));
   }
 }
 
@@ -182,25 +167,45 @@ contract Initialize is PermitterTest {
 contract Validate is PermitterTest {
   function setUp() public override {
     super.setUp();
-    // Create a proper permitter with the CCA as auction
-    permitter = _createPermitterWithAuction(address(cca));
+    permitter = _createPermitterAndAuthorizeCCA();
     cca.setValidationHook(address(permitter));
   }
 
   function test_ValidatesSuccessfulBid() public {
-    uint128 amount = 1000e18; // $1000
+    uint128 amount = 1000e18;
 
     vm.prank(bidder1);
     cca.submitBid(1e18, amount, bidder1, "");
 
     // Check state was updated
-    assertEq(permitter.getUserPurchases(bidder1), 1000e18);
-    assertEq(permitter.totalPurchasesUsd(), 1000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 1000e18);
+    assertEq(permitter.totalCommitted(), 1000e18);
   }
 
-  function test_RevertIf_NotFromAuction() public {
+  function test_RevertIf_CCANotConfigured() public {
+    // Create a permitter without authorizing CCA
+    Permitter.Config memory config = Permitter.Config({
+      identityRegistry: address(identityRegistry),
+      policyEngine: address(policyEngine),
+      merkleRoot: bytes32(0),
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
+      requireSanctionsCheck: true,
+      requireAllowlist: false
+    });
+
+    vm.prank(owner);
+    Permitter unconfiguredPermitter = Permitter(factory.createPermitter(config));
+    cca.setValidationHook(address(unconfiguredPermitter));
+
     vm.prank(bidder1);
-    vm.expectRevert(Permitter.NotFromAuction.selector);
+    vm.expectRevert(Permitter.CCANotConfigured.selector);
+    cca.submitBid(1e18, 1000e18, bidder1, "");
+  }
+
+  function test_RevertIf_UnauthorizedCCA() public {
+    vm.prank(bidder1);
+    vm.expectRevert(Permitter.UnauthorizedCCA.selector);
     permitter.validate(1e18, 1000e18, bidder1, bidder1, "");
   }
 
@@ -219,14 +224,14 @@ contract Validate is PermitterTest {
 contract SanctionsCheck is PermitterTest {
   function setUp() public override {
     super.setUp();
-    permitter = _createPermitterWithAuction(address(cca));
+    permitter = _createPermitterAndAuthorizeCCA();
     cca.setValidationHook(address(permitter));
   }
 
   function test_PassesWhenNotSanctioned() public {
     vm.prank(bidder1);
     cca.submitBid(1e18, 1000e18, bidder1, "");
-    assertEq(permitter.getUserPurchases(bidder1), 1000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 1000e18);
   }
 
   function test_RevertIf_NoCCID() public {
@@ -234,7 +239,7 @@ contract SanctionsCheck is PermitterTest {
     // Don't register CCID for this bidder
 
     vm.prank(noCcidBidder);
-    vm.expectRevert(abi.encodeWithSelector(Permitter.NoCCIDRegistered.selector, noCcidBidder));
+    vm.expectRevert(abi.encodeWithSelector(Permitter.NoCCIDFound.selector, noCcidBidder));
     cca.submitBid(1e18, 1000e18, noCcidBidder, "");
   }
 
@@ -244,27 +249,26 @@ contract SanctionsCheck is PermitterTest {
     policyEngine.blockCCID(ccid1);
 
     vm.prank(bidder1);
-    vm.expectRevert(abi.encodeWithSelector(Permitter.PolicyCheckFailed.selector, bidder1, ccid1));
+    vm.expectRevert(abi.encodeWithSelector(Permitter.SanctionsFailed.selector, bidder1, ccid1));
     cca.submitBid(1e18, 1000e18, bidder1, "");
   }
 
   function test_SkipsSanctionsWhenNotRequired() public {
     // Create permitter without sanctions check
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: false, // Disabled
       requireAllowlist: false
     });
 
     vm.prank(owner);
     Permitter p = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
     cca.setValidationHook(address(p));
 
     // Bidder without CCID should pass
@@ -272,7 +276,7 @@ contract SanctionsCheck is PermitterTest {
     vm.prank(noCcidBidder);
     cca.submitBid(1e18, 1000e18, noCcidBidder, "");
 
-    assertEq(p.getUserPurchases(noCcidBidder), 1000e18);
+    assertEq(p.getUserCommitted(noCcidBidder), 1000e18);
   }
 }
 
@@ -281,17 +285,17 @@ contract SanctionsCheck is PermitterTest {
 contract PerUserLimit is PermitterTest {
   function setUp() public override {
     super.setUp();
-    permitter = _createPermitterWithAuction(address(cca));
+    permitter = _createPermitterAndAuthorizeCCA();
     cca.setValidationHook(address(permitter));
   }
 
   function test_AllowsBidWithinLimit() public {
-    uint128 amount = 5000e18; // $5000, under $10k limit
+    uint128 amount = 5000e18; // Under 10k limit
 
     vm.prank(bidder1);
     cca.submitBid(1e18, amount, bidder1, "");
 
-    assertEq(permitter.getUserPurchases(bidder1), 5000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 5000e18);
     assertEq(permitter.getRemainingUserCapacity(bidder1), 5000e18);
   }
 
@@ -305,7 +309,7 @@ contract PerUserLimit is PermitterTest {
     vm.prank(bidder1);
     cca.submitBid(1e18, 2000e18, bidder1, ""); // Exactly at limit
 
-    assertEq(permitter.getUserPurchases(bidder1), 10_000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 10_000e18);
     assertEq(permitter.getRemainingUserCapacity(bidder1), 0);
   }
 
@@ -315,9 +319,7 @@ contract PerUserLimit is PermitterTest {
 
     vm.prank(bidder1);
     vm.expectRevert(
-      abi.encodeWithSelector(
-        Permitter.PerUserLimitExceeded.selector, 3000e18, PER_USER_LIMIT, 8000e18
-      )
+      abi.encodeWithSelector(Permitter.IndividualLimitExceeded.selector, ccid1, 3000e18, 2000e18)
     );
     cca.submitBid(1e18, 3000e18, bidder1, "");
   }
@@ -336,15 +338,13 @@ contract PerUserLimit is PermitterTest {
     cca.submitBid(1e18, 3000e18, bidder1Alt, "");
 
     // Total should be accumulated
-    assertEq(permitter.getUserPurchases(bidder1), 9000e18);
-    assertEq(permitter.getUserPurchases(bidder1Alt), 9000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 9000e18);
+    assertEq(permitter.getUserCommitted(bidder1Alt), 9000e18);
 
     // Third bid should exceed limit
     vm.prank(bidder1);
     vm.expectRevert(
-      abi.encodeWithSelector(
-        Permitter.PerUserLimitExceeded.selector, 2000e18, PER_USER_LIMIT, 9000e18
-      )
+      abi.encodeWithSelector(Permitter.IndividualLimitExceeded.selector, ccid1, 2000e18, 1000e18)
     );
     cca.submitBid(1e18, 2000e18, bidder1, "");
   }
@@ -352,20 +352,19 @@ contract PerUserLimit is PermitterTest {
   function test_NoLimitWhenZero() public {
     // Create permitter with no per-user limit
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: 0, // No limit
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: 0, // No limit
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: true,
       requireAllowlist: false
     });
 
     vm.prank(owner);
     Permitter p = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
     cca.setValidationHook(address(p));
 
     // Should allow very large bid
@@ -384,20 +383,19 @@ contract GlobalCap is PermitterTest {
 
     // Create permitter with smaller global cap for testing
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: 100_000e18, // Higher user limit
-      globalCapUsd: 20_000e18, // $20k global cap
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: 100_000e18, // Higher user limit
+      globalCap: 20_000e18, // 20k global cap
       requireSanctionsCheck: true,
       requireAllowlist: false
     });
 
     vm.prank(owner);
     permitter = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    permitter.authorizeCCA(address(cca));
     cca.setValidationHook(address(permitter));
   }
 
@@ -405,7 +403,7 @@ contract GlobalCap is PermitterTest {
     vm.prank(bidder1);
     cca.submitBid(1e18, 10_000e18, bidder1, "");
 
-    assertEq(permitter.totalPurchasesUsd(), 10_000e18);
+    assertEq(permitter.totalCommitted(), 10_000e18);
     assertEq(permitter.getRemainingGlobalCapacity(), 10_000e18);
   }
 
@@ -416,7 +414,7 @@ contract GlobalCap is PermitterTest {
     vm.prank(bidder2);
     cca.submitBid(1e18, 10_000e18, bidder2, "");
 
-    assertEq(permitter.totalPurchasesUsd(), 20_000e18);
+    assertEq(permitter.totalCommitted(), 20_000e18);
     assertEq(permitter.getRemainingGlobalCapacity(), 0);
   }
 
@@ -426,117 +424,41 @@ contract GlobalCap is PermitterTest {
 
     vm.prank(bidder2);
     vm.expectRevert(
-      abi.encodeWithSelector(Permitter.GlobalCapExceeded.selector, 10_000e18, 20_000e18, 15_000e18)
+      abi.encodeWithSelector(Permitter.GlobalCapExceeded.selector, 10_000e18, 5000e18)
     );
     cca.submitBid(1e18, 10_000e18, bidder2, "");
   }
-}
 
-// ========== PRICE CONVERSION TESTS ==========
-
-contract PriceConversion is PermitterTest {
-  function setUp() public override {
-    super.setUp();
-    permitter = _createPermitterWithAuction(address(cca));
-    cca.setValidationHook(address(permitter));
-  }
-
-  function test_ConvertsCorrectlyAtParity() public {
-    // Price is $1, so 1000 tokens = $1000
-    vm.prank(bidder1);
-    cca.submitBid(1e18, 1000e18, bidder1, "");
-
-    assertEq(permitter.getUserPurchases(bidder1), 1000e18);
-  }
-
-  function test_ConvertsCorrectlyWithHigherPrice() public {
-    priceOracle.setPrice(2e8); // $2
-
-    vm.prank(bidder1);
-    cca.submitBid(1e18, 1000e18, bidder1, "");
-
-    assertEq(permitter.getUserPurchases(bidder1), 2000e18);
-  }
-
-  function test_RevertIf_InvalidPrice() public {
-    priceOracle.setInvalidPrice();
-
-    vm.prank(bidder1);
-    vm.expectRevert(Permitter.InvalidPriceData.selector);
-    cca.submitBid(1e18, 1000e18, bidder1, "");
-  }
-
-  function test_RevertIf_StalePrice() public {
-    // Warp to a reasonable timestamp first
-    vm.warp(10_000);
-
-    // Set updated time to 2 hours ago
-    uint256 staleTime = block.timestamp - 7200;
-    priceOracle.setUpdatedAt(staleTime);
-
-    vm.prank(bidder1);
-    vm.expectRevert(abi.encodeWithSelector(Permitter.StalePriceData.selector, staleTime, 3600));
-    cca.submitBid(1e18, 1000e18, bidder1, "");
-  }
-
-  function test_WorksWithoutOracle() public {
-    // Create permitter without price oracle
+  function test_NoCapWhenZero() public {
+    // Create permitter with no global cap
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(0), // No oracle
       merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: 6, // USDC-like
+      perUserLimit: 0,
+      globalCap: 0, // No cap
       requireSanctionsCheck: true,
       requireAllowlist: false
     });
 
     vm.prank(owner);
     Permitter p = Permitter(factory.createPermitter(config));
-    cca.setValidationHook(address(p));
-
-    // Bid 1000 USDC (6 decimals) should scale to 18 decimals
-    vm.prank(bidder1);
-    cca.submitBid(1e18, 1000e6, bidder1, "");
-
-    assertEq(p.getUserPurchases(bidder1), 1000e18);
-  }
-
-  function test_WorksWithHighDecimalToken() public {
-    // Create permitter without price oracle and a token with >18 decimals
-    Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
-      identityRegistry: address(identityRegistry),
-      policyEngine: address(policyEngine),
-      priceOracle: address(0), // No oracle
-      merkleRoot: bytes32(0),
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: 24, // Token with 24 decimals
-      requireSanctionsCheck: true,
-      requireAllowlist: false
-    });
-
     vm.prank(owner);
-    Permitter p = Permitter(factory.createPermitter(config));
+    p.authorizeCCA(address(cca));
     cca.setValidationHook(address(p));
 
-    // Bid 1000 tokens (24 decimals) should scale to 18 decimals (divide by 1e6)
-    // 1000 * 1e24 / 1e6 = 1000e18
+    // Should allow very large bid
     vm.prank(bidder1);
-    cca.submitBid(1e18, 1000e24, bidder1, "");
+    cca.submitBid(1e18, 1_000_000_000e18, bidder1, "");
 
-    assertEq(p.getUserPurchases(bidder1), 1000e18);
+    assertEq(p.getRemainingGlobalCapacity(), type(uint256).max);
   }
 }
 
 // ========== ALLOWLIST TESTS ==========
 
 contract AllowlistCheck is PermitterTest {
-  bytes32 merkleRoot;
+  bytes32 testMerkleRoot;
   bytes32[] proof1;
 
   function setUp() public override {
@@ -548,31 +470,30 @@ contract AllowlistCheck is PermitterTest {
 
     // Simple 2-leaf tree: root = hash(leaf1, leaf2)
     if (leaf1 < leaf2) {
-      merkleRoot = keccak256(bytes.concat(leaf1, leaf2));
+      testMerkleRoot = keccak256(bytes.concat(leaf1, leaf2));
       proof1 = new bytes32[](1);
       proof1[0] = leaf2;
     } else {
-      merkleRoot = keccak256(bytes.concat(leaf2, leaf1));
+      testMerkleRoot = keccak256(bytes.concat(leaf2, leaf1));
       proof1 = new bytes32[](1);
       proof1[0] = leaf2;
     }
 
     // Create permitter with allowlist
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
-      merkleRoot: merkleRoot,
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      merkleRoot: testMerkleRoot,
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: true,
       requireAllowlist: true
     });
 
     vm.prank(owner);
     permitter = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    permitter.authorizeCCA(address(cca));
     cca.setValidationHook(address(permitter));
   }
 
@@ -580,7 +501,7 @@ contract AllowlistCheck is PermitterTest {
     vm.prank(bidder1);
     cca.submitBid(1e18, 1000e18, bidder1, abi.encode(proof1));
 
-    assertEq(permitter.getUserPurchases(bidder1), 1000e18);
+    assertEq(permitter.getUserCommitted(bidder1), 1000e18);
   }
 
   function test_RevertIf_NotOnAllowlist() public {
@@ -607,27 +528,79 @@ contract AllowlistCheck is PermitterTest {
   function test_SkipsAllowlistWhenNoMerkleRoot() public {
     // Create permitter with allowlist required but no merkle root
     Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
       identityRegistry: address(identityRegistry),
       policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
       merkleRoot: bytes32(0), // No merkle root
-      perUserLimitUsd: PER_USER_LIMIT,
-      globalCapUsd: GLOBAL_CAP,
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
+      perUserLimit: PER_USER_LIMIT,
+      globalCap: GLOBAL_CAP,
       requireSanctionsCheck: true,
       requireAllowlist: true
     });
 
     vm.prank(owner);
     Permitter p = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
     cca.setValidationHook(address(p));
 
     // Should pass without proof
     vm.prank(bidder1);
     cca.submitBid(1e18, 1000e18, bidder1, "");
 
-    assertEq(p.getUserPurchases(bidder1), 1000e18);
+    assertEq(p.getUserCommitted(bidder1), 1000e18);
+  }
+}
+
+// ========== CHECK ELIGIBILITY TESTS ==========
+
+contract CheckEligibility is PermitterTest {
+  function setUp() public override {
+    super.setUp();
+    permitter = _createPermitterAndAuthorizeCCA();
+    cca.setValidationHook(address(permitter));
+  }
+
+  function test_ReturnsTrueForEligibleBidder() public view {
+    assertTrue(permitter.checkEligibility(bidder1));
+  }
+
+  function test_ReturnsFalseIfNoCCID() public {
+    address noCcidBidder = makeAddr("noCcidBidder");
+    assertFalse(permitter.checkEligibility(noCcidBidder));
+  }
+
+  function test_ReturnsFalseIfAtLimit() public {
+    // Use up the entire limit
+    vm.prank(bidder1);
+    cca.submitBid(1e18, uint128(PER_USER_LIMIT), bidder1, "");
+
+    assertFalse(permitter.checkEligibility(bidder1));
+  }
+
+  function test_ReturnsFalseIfGlobalCapReached() public {
+    // Create permitter with small global cap
+    Permitter.Config memory config = Permitter.Config({
+      identityRegistry: address(identityRegistry),
+      policyEngine: address(policyEngine),
+      merkleRoot: bytes32(0),
+      perUserLimit: type(uint256).max,
+      globalCap: 1000e18,
+      requireSanctionsCheck: true,
+      requireAllowlist: false
+    });
+
+    vm.prank(owner);
+    Permitter p = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
+    cca.setValidationHook(address(p));
+
+    // Fill up global cap
+    vm.prank(bidder1);
+    cca.submitBid(1e18, 1000e18, bidder1, "");
+
+    // bidder2 should now be ineligible
+    assertFalse(p.checkEligibility(bidder2));
   }
 }
 
@@ -636,14 +609,14 @@ contract AllowlistCheck is PermitterTest {
 contract AdminFunctions is PermitterTest {
   function setUp() public override {
     super.setUp();
-    permitter = _createPermitterWithAuction(address(cca));
+    permitter = _createPermitterAndAuthorizeCCA();
   }
 
   function test_SetPerUserLimit() public {
     vm.prank(owner);
     permitter.setPerUserLimit(20_000e18);
 
-    assertEq(permitter.perUserLimitUsd(), 20_000e18);
+    assertEq(permitter.perUserLimit(), 20_000e18);
   }
 
   function test_SetPerUserLimit_EmitsEvent() public {
@@ -663,7 +636,7 @@ contract AdminFunctions is PermitterTest {
     vm.prank(owner);
     permitter.setGlobalCap(100_000_000e18);
 
-    assertEq(permitter.globalCapUsd(), 100_000_000e18);
+    assertEq(permitter.globalCap(), 100_000_000e18);
   }
 
   function test_SetMerkleRoot() public {
@@ -732,40 +705,8 @@ contract AdminFunctions is PermitterTest {
 contract FuzzTests is PermitterTest {
   function setUp() public override {
     super.setUp();
-    permitter = _createPermitterWithAuction(address(cca));
+    permitter = _createPermitterAndAuthorizeCCA();
     cca.setValidationHook(address(permitter));
-  }
-
-  function testFuzz_PriceConversion(uint128 amount, int256 price) public {
-    // Create a permitter with no per-user limit for this test
-    Permitter.Config memory config = Permitter.Config({
-      auction: address(cca),
-      identityRegistry: address(identityRegistry),
-      policyEngine: address(policyEngine),
-      priceOracle: address(priceOracle),
-      merkleRoot: bytes32(0),
-      perUserLimitUsd: 0, // No limit
-      globalCapUsd: type(uint256).max, // Very high cap
-      bidTokenDecimals: BID_TOKEN_DECIMALS,
-      requireSanctionsCheck: true,
-      requireAllowlist: false
-    });
-
-    vm.prank(owner);
-    Permitter unlimitedPermitter = Permitter(factory.createPermitter(config));
-    cca.setValidationHook(address(unlimitedPermitter));
-
-    // Bound inputs to reasonable ranges
-    amount = uint128(bound(amount, 1e10, 1e26));
-    price = int256(bound(price, 1e4, 1e12));
-
-    priceOracle.setPrice(price);
-
-    vm.prank(bidder1);
-    cca.submitBid(1e18, amount, bidder1, "");
-
-    // Verify state was updated
-    unlimitedPermitter.getUserPurchases(bidder1);
   }
 
   function testFuzz_MultiplePurchasesAccumulate(uint128[5] memory amounts) public {
@@ -776,14 +717,52 @@ contract FuzzTests is PermitterTest {
       uint128 amount = uint128(bound(amounts[i], 0, 1000e18));
       if (amount == 0) continue;
 
-      uint256 amountUsd = uint256(amount);
-      if (total + amountUsd > PER_USER_LIMIT) break;
+      uint256 amountTokens = uint256(amount);
+      if (total + amountTokens > PER_USER_LIMIT) break;
 
       vm.prank(bidder1);
       cca.submitBid(1e18, amount, bidder1, "");
-      total += amountUsd;
+      total += amountTokens;
     }
 
-    assertEq(permitter.getUserPurchases(bidder1), total);
+    assertEq(permitter.getUserCommitted(bidder1), total);
+  }
+
+  function testFuzz_GlobalCapEnforced(uint128 amount1, uint128 amount2) public {
+    // Create permitter with smaller global cap
+    Permitter.Config memory config = Permitter.Config({
+      identityRegistry: address(identityRegistry),
+      policyEngine: address(policyEngine),
+      merkleRoot: bytes32(0),
+      perUserLimit: type(uint256).max,
+      globalCap: 100_000e18,
+      requireSanctionsCheck: true,
+      requireAllowlist: false
+    });
+
+    vm.prank(owner);
+    Permitter p = Permitter(factory.createPermitter(config));
+    vm.prank(owner);
+    p.authorizeCCA(address(cca));
+    cca.setValidationHook(address(p));
+
+    amount1 = uint128(bound(amount1, 1, 50_000e18));
+    amount2 = uint128(bound(amount2, 1, 50_000e18));
+
+    vm.prank(bidder1);
+    cca.submitBid(1e18, amount1, bidder1, "");
+
+    if (uint256(amount1) + uint256(amount2) <= 100_000e18) {
+      vm.prank(bidder2);
+      cca.submitBid(1e18, amount2, bidder2, "");
+      assertEq(p.totalCommitted(), uint256(amount1) + uint256(amount2));
+    } else {
+      uint256 remaining = 100_000e18 - uint256(amount1);
+      vm.prank(bidder2);
+      vm.expectRevert(
+        abi.encodeWithSelector(Permitter.GlobalCapExceeded.selector, uint256(amount2), remaining)
+      );
+      cca.submitBid(1e18, amount2, bidder2, "");
+    }
   }
 }

@@ -7,23 +7,19 @@ import {Permitter} from "../src/Permitter.sol";
 
 contract PermitterFactoryTest is Test {
   PermitterFactory factory;
-  address auction = makeAddr("auction");
   address creator = makeAddr("creator");
 
   function setUp() public {
     factory = new PermitterFactory();
   }
 
-  function _defaultConfig() internal view returns (Permitter.Config memory) {
+  function _defaultConfig() internal pure returns (Permitter.Config memory) {
     return Permitter.Config({
-      auction: auction,
       identityRegistry: address(0),
       policyEngine: address(0),
-      priceOracle: address(0),
       merkleRoot: bytes32(0),
-      perUserLimitUsd: 10_000e18,
-      globalCapUsd: 50_000_000e18,
-      bidTokenDecimals: 18,
+      perUserLimit: 10_000e18,
+      globalCap: 50_000_000e18,
       requireSanctionsCheck: false,
       requireAllowlist: false
     });
@@ -53,23 +49,23 @@ contract CreatePermitter is PermitterFactoryTest {
 
   function test_InitializesPermitterCorrectly() public {
     Permitter.Config memory config = _defaultConfig();
-    config.perUserLimitUsd = 5000e18;
-    config.globalCapUsd = 1_000_000e18;
+    config.perUserLimit = 5000e18;
+    config.globalCap = 1_000_000e18;
 
     vm.prank(creator);
     address permitterAddr = factory.createPermitter(config);
     Permitter permitter = Permitter(permitterAddr);
 
     assertEq(permitter.owner(), creator);
-    assertEq(permitter.auction(), auction);
-    assertEq(permitter.perUserLimitUsd(), 5000e18);
-    assertEq(permitter.globalCapUsd(), 1_000_000e18);
+    assertEq(permitter.auction(), address(0)); // Not authorized yet
+    assertEq(permitter.perUserLimit(), 5000e18);
+    assertEq(permitter.globalCap(), 1_000_000e18);
   }
 
   function test_EmitsPermitterCreatedEvent() public {
     vm.prank(creator);
-    vm.expectEmit(false, true, true, false);
-    emit PermitterFactory.PermitterCreated(address(0), creator, auction);
+    vm.expectEmit(false, true, false, false);
+    emit PermitterFactory.PermitterCreated(address(0), creator);
     factory.createPermitter(_defaultConfig());
   }
 
@@ -83,15 +79,6 @@ contract CreatePermitter is PermitterFactoryTest {
     assertEq(permitters.length, 2);
     assertEq(permitters[0], permitter1);
     assertEq(permitters[1], permitter2);
-  }
-
-  function test_RevertIf_ZeroAuction() public {
-    Permitter.Config memory config = _defaultConfig();
-    config.auction = address(0);
-
-    vm.prank(creator);
-    vm.expectRevert(PermitterFactory.ZeroAddress.selector);
-    factory.createPermitter(config);
   }
 }
 
@@ -147,5 +134,33 @@ contract GetPermittersByCreator is PermitterFactoryTest {
     assertEq(permitters[0], p1);
     assertEq(permitters[1], p2);
     assertEq(permitters[2], p3);
+  }
+}
+
+contract AuthorizeCCAAfterCreate is PermitterFactoryTest {
+  function test_OwnerCanAuthorizeCCA() public {
+    vm.prank(creator);
+    address permitterAddr = factory.createPermitter(_defaultConfig());
+    Permitter permitter = Permitter(permitterAddr);
+
+    address cca = makeAddr("cca");
+
+    vm.prank(creator);
+    permitter.authorizeCCA(cca);
+
+    assertEq(permitter.auction(), cca);
+  }
+
+  function test_NonOwnerCannotAuthorizeCCA() public {
+    vm.prank(creator);
+    address permitterAddr = factory.createPermitter(_defaultConfig());
+    Permitter permitter = Permitter(permitterAddr);
+
+    address cca = makeAddr("cca");
+    address notOwner = makeAddr("notOwner");
+
+    vm.prank(notOwner);
+    vm.expectRevert(Permitter.Unauthorized.selector);
+    permitter.authorizeCCA(cca);
   }
 }
